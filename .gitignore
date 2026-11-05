@@ -1,0 +1,54 @@
+# Local Python environments and downloaded runtimes
+.venv/
+venv/
+env/
+.runtime/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Private photos, labels, local paths, generated datasets and scene metadata
+/data/
+/scene_groups.json
+
+# Weights, experiments, generated predictions and feature caches
+/models/
+/runs/
+/outputs/
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.safetensors
+*.npy
+*.npz
+*.zip
+*.7z
+*.tar
+*.gz
+*.log
+*.tmp
+*.part
+.ipynb_checkpoints/
+
+# Secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
