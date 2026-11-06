@@ -40,6 +40,18 @@ def attachment_asset(name):
     return send_from_directory(ROOT/'outputs'/'attachment_experiment',name)
 
 
+@bp.get('/mask2former/pin-review/')
+def pin_review_results():
+    folder='pinned_review_v2' if (ROOT/'outputs/pinned_review_v2/index.html').exists() else 'pinned_review_v1'
+    return send_from_directory(ROOT/'outputs'/folder,'index.html')
+
+
+@bp.get('/mask2former/pin-review/<name>')
+def pin_review_asset(name):
+    folder='pinned_review_v2' if (ROOT/'outputs/pinned_review_v2/index.html').exists() else 'pinned_review_v1'
+    return send_from_directory(ROOT/'outputs'/folder,name)
+
+
 @bp.get('/mask2former/results/')
 def saved_results():
     return send_from_directory(ROOT/'outputs'/'mask2former_evaluation','index.html')
@@ -69,9 +81,14 @@ def status():
         candidate = json.loads(evaluation_path.read_text(encoding='utf-8'))
         if candidate.get('checkpoint_sha256')==hashlib.sha256(head_path.read_bytes()).hexdigest():
             evaluation = {k:v for k,v in candidate.items() if k!='records'}
+    active_path=ROOT/'models'/'active_hazard_model.json'
+    active_review=None
+    if active_path.exists() and head_path.exists():
+        active=json.loads(active_path.read_text(encoding='utf-8'))
+        if active.get('checkpoint_sha256')==hashlib.sha256(head_path.read_bytes()).hexdigest():active_review=active
     return jsonify(ready=all((MODEL_DIR/n).exists() for n in ('model.safetensors','config.json','preprocessor_config.json')),
                    loaded=_net is not None, task='stairs_and_hazard_candidates',
-                   hazard_head_ready=head_path.exists(),hazard_evaluation=evaluation)
+                   hazard_head_ready=head_path.exists(),hazard_evaluation=evaluation,active_review=active_review)
 
 
 @bp.post('/api/mask2former/analyze')

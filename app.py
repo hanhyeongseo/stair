@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 import uuid
 import re
+import shutil
 
 import cv2
 import numpy as np
@@ -20,6 +21,8 @@ jobs={};video_slot=threading.BoundedSemaphore(1)
 
 from mask2former_routes import bp as mask2former_bp
 app.register_blueprint(mask2former_bp)
+from photo_pins import bp as photo_pins_bp
+app.register_blueprint(photo_pins_bp)
 
 
 def read_json(path,default=None):
@@ -184,6 +187,18 @@ def video():
             raise ValueError('잘못된 모델 또는 입력 방식입니다.')
         key=uuid.uuid4().hex;path=OUTPUT/(key+'_input.mp4');file.save(path)
         if path.stat().st_size>120*1024*1024:raise ValueError('영상은 120MB 이하만 지원합니다.')
+        from saved_video_results import matching_saved_result
+        saved=matching_saved_result(path,engine,input_view)
+        if saved:
+            destination=OUTPUT/(key+'_result.mp4')
+            shutil.copy2(saved['path'],destination)
+            metadata={k:v for k,v in saved.items() if k!='path'}
+            jobs[key]={'id':key,'status':'done','progress':100,'engine':engine,'input_view':input_view,
+                       'result':str(destination),**metadata}
+            # Preserve provenance for results shown after restarting the server.
+            (OUTPUT/(key+'_metadata.json')).write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
+            path.unlink(missing_ok=True);video_slot.release()
+            return jsonify(id=key,reused_analysis=True),202
         jobs[key]={'id':key,'status':'queued','progress':0,'engine':engine,'input_view':input_view}
         threading.Thread(target=process_video,args=(key,path,confidence,request.form.get('color','true')=='true',engine,input_view),daemon=True).start()
         return jsonify(id=key),202
@@ -205,7 +220,9 @@ def completed_video(key):
     if key in jobs:return jobs[key]
     if not re.fullmatch(r'[a-f0-9]{32}',key):return None
     path=OUTPUT/(key+'_result.mp4')
-    if path.is_file():return {'id':key,'status':'done','progress':100,'result':str(path)}
+    if path.is_file():
+        metadata=read_json(OUTPUT/(key+'_metadata.json'),{})
+        return {**metadata,'id':key,'status':'done','progress':100,'result':str(path)}
     return None
 
 
@@ -221,6 +238,52 @@ def video_gallery():
     paths=sorted(OUTPUT.glob('*_result.mp4'),key=lambda p:p.stat().st_mtime,reverse=True)
     keys=[p.name.removesuffix('_result.mp4') for p in paths if re.fullmatch(r'[a-f0-9]{32}_result.mp4',p.name)]
     return render_template('videos.html',keys=keys)
+
+
+@app.get('/video-compare/')
+def comparison_video_page():
+    return send_from_directory(ROOT/'outputs/dark_video_comparison','index.html')
+
+
+@app.get('/dark-demo/')
+def dark_demo_page():
+    folder=ROOT/'outputs/dark_demo'
+    if not (folder/'index.html').exists() and (folder/'progress.json').exists():
+        return render_template('demo_progress.html')
+    return send_from_directory(ROOT/'outputs/dark_demo','index.html')
+
+
+@app.get('/orange-demo/')
+def orange_demo_page():
+    folder=ROOT/'outputs/dark_demo_orange'
+    if not (folder/'index.html').exists() and (folder/'progress.json').exists():
+        return render_template('demo_progress.html')
+    return send_from_directory(ROOT/'outputs/dark_demo_orange','index.html')
+
+
+@app.get('/sparse-overlay/')
+def sparse_overlay_page():
+    return send_from_directory(ROOT/'outputs/dark_sparse_overlay','index.html')
+
+
+@app.get('/sparse-overlay/<name>')
+def sparse_overlay_asset(name):
+    return send_from_directory(ROOT/'outputs/dark_sparse_overlay',name,conditional=True)
+
+
+@app.get('/orange-demo/<name>')
+def orange_demo_asset(name):
+    return send_from_directory(ROOT/'outputs/dark_demo_orange',name,conditional=True)
+
+
+@app.get('/dark-demo/<name>')
+def dark_demo_asset(name):
+    return send_from_directory(ROOT/'outputs/dark_demo',name,conditional=True)
+
+
+@app.get('/video-compare/<name>')
+def comparison_video_asset(name):
+    return send_from_directory(ROOT/'outputs/dark_video_comparison',name,conditional=True)
 
 
 @app.get('/api/video/<key>/download')

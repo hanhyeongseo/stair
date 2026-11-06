@@ -5,6 +5,7 @@ The hazard head learns selected regions; there is no explicit ordinal counting.
 import os
 import threading
 import time
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -18,7 +19,7 @@ os.environ.setdefault('HF_HOME', str(ROOT / '.cache' / 'huggingface'))
 
 
 class StairsDetector:
-    def __init__(self):
+    def __init__(self,head_path=None):
         import torch
         from transformers import Mask2FormerImageProcessor, Mask2FormerForUniversalSegmentation
         if not (MODEL_DIR / 'model.safetensors').exists():
@@ -34,13 +35,17 @@ class StairsDetector:
         if len(self.stair_ids) != 3:
             raise ValueError('예상한 ADE20K 계단 클래스가 없습니다.')
         self.hazard_head = None
-        head_path = ROOT/'models'/'mask2former_hazard_head.pt'
+        self.hazard_checkpoint_sha256 = None
+        self.hazard_manifest_sha256 = None
+        head_path = Path(head_path) if head_path is not None else ROOT/'models'/'mask2former_hazard_head.pt'
         if head_path.exists():
             from hazard_head import HazardHead
             state = torch.load(head_path,map_location=self.device,weights_only=True)
             self.hazard_head = HazardHead().to(self.device).eval()
             self.hazard_head.load_state_dict(state['state_dict'])
             self.hazard_threshold = float(state['threshold'])
+            self.hazard_checkpoint_sha256 = hashlib.sha256(head_path.read_bytes()).hexdigest()
+            self.hazard_manifest_sha256 = state.get('manifest_sha256')
 
     def segment(self, image, return_features=False):
         """Official semantic class aggregation followed by per-pixel argmax.
@@ -110,14 +115,12 @@ class StairsDetector:
                 hazard,score = probability_mask(probability,mask,self.hazard_threshold)
                 refined = source.copy()
                 lines = stair_edges(source,mask)
-                for x,y,xx,yy in lines:cv2.line(refined,(x,y),(xx,yy),(0,190,255),2)
-                red = np.full_like(source,(40,50,245))
-                refined[hazard>0] = cv2.addWeighted(source,.5,red,.5,0)[hazard>0]
+                from overlay_style import candidate_overlay,ORANGE
+                refined=candidate_overlay(source,hazard)
                 hc,_ = cv2.findContours(hazard,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(refined,hc,-1,(40,50,255),3)
                 ht = np.zeros((*mask.shape,4),np.uint8)
-                ht[hazard>0] = (40,50,245,120)
-                cv2.drawContours(ht,hc,-1,(40,50,255,255),2)
+                ht[hazard>0] = (*ORANGE,15)
+                cv2.drawContours(ht,hc,-1,(*ORANGE,255),2)
                 views[name+'_hazard_overlay'] = refined
                 views[name+'_hazard_mask'] = hazard
                 views[name+'_hazard_transparent'] = ht
@@ -137,5 +140,7 @@ class StairsDetector:
                   'fine_tuned_on_team_photos': getattr(self,'hazard_head',None) is not None,
                   'backbone_fine_tuned_on_team_photos':False,
                   'hazard_head_trained_on_team_photos':getattr(self,'hazard_head',None) is not None,
-                  'warning': '파랑은 계단 전체, 빨강은 팀 라벨로 학습한 위험 단차 후보, 주황은 모서리 후보입니다. 상하행·단 순서를 명시적으로 판단하지 않으며 미검출은 안전 판정이 아닙니다.'}
+                  'hazard_checkpoint_sha256':getattr(self,'hazard_checkpoint_sha256',None),
+                  'hazard_training_manifest_sha256':getattr(self,'hazard_manifest_sha256',None),
+                  'warning': '주황 윤곽선은 위험 단차 후보, 파랑은 계단 전체입니다. 위험도를 판단해 색을 바꾸지 않습니다. 미검출은 안전 판정이 아닙니다.'}
         return views, report

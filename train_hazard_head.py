@@ -4,8 +4,10 @@ Existing park test has been inspected in prior work; later evaluations are
 development comparisons, not a fresh independent unseen-site benchmark.
 """
 import hashlib
+import argparse
 import json
 import random
+import copy
 from pathlib import Path
 
 import cv2
@@ -20,14 +22,27 @@ from vision import enhance
 
 
 def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--manifest',type=Path,default=ROOT/'data'/'manifest.json')
+    parser.add_argument('--name',default='mask2former_hazard_head')
+    parser.add_argument('--epochs',type=int,default=60)
+    parser.add_argument('--pins',type=Path)
+    parser.add_argument('--pin-weight',type=int,default=1)
+    parser.add_argument('--positive-weight',type=float,default=5.)
+    parser.add_argument('--initialize',type=Path)
+    parser.add_argument('--learning-rate',type=float,default=.0005)
+    parser.add_argument('--distillation',type=float,default=0.)
+    args=parser.parse_args()
+    if not args.name.replace('_','').isalnum() or args.pin_weight<1:raise ValueError('Invalid experiment name or pin weight')
     torch.manual_seed(1105);np.random.seed(1105);random.seed(1105)
-    manifest = ROOT/'data'/'manifest.json'
+    manifest = args.manifest
+    pinned=set(json.loads(args.pins.read_text(encoding='utf-8'))) if args.pins else set()
     records = json.loads(manifest.read_text(encoding='utf-8'))['records']
     cache = ROOT/'.cache'/'hazard_features_v1'/hashlib.sha256(manifest.read_bytes()).hexdigest()[:16]
     cache.mkdir(parents=True,exist_ok=True)
     net = StairsDetector()
     device = net.device
-    splits = {'train':[],'val':[]}
+    splits = {'train':[],'val':[]};weights={}
     for index,row in enumerate(records):
         if row['split'] not in splits:continue
         image = load_image(Path(row['image']))
@@ -53,27 +68,47 @@ def main():
                     sample['region_full'] = torch.from_numpy(np.isin(semantic,net.stair_ids).astype(np.uint8))
                 torch.save(sample,path)
             splits[row['split']].append(path)
+            weights[str(path)]=args.pin_weight if row['split']=='train' and row['id'] in pinned else 1
         print(f'features {index+1}/{len(records)} {row["id"]}',flush=True)
     # Release the frozen backbone before training the head.
     del net
     if device=='cuda':torch.cuda.empty_cache()
     data = {key:[torch.load(path,map_location='cpu',weights_only=True) for path in paths] for key,paths in splits.items()}
+    for sample,path in zip(data['train'],splits['train']):sample['review_weight']=weights[str(path)]
+    torch.manual_seed(1105)
     head = HazardHead().to(device)
-    optimizer = torch.optim.AdamW(head.parameters(),lr=.0005,weight_decay=.01)
+    if args.initialize:
+        initial=torch.load(args.initialize,map_location=device,weights_only=True)
+        head.load_state_dict(initial['state_dict'])
+    teacher=None
+    if args.distillation>0:
+        if args.initialize is None:raise ValueError('Distillation requires initialization checkpoint')
+        teacher=copy.deepcopy(head).eval()
+        with torch.inference_mode():
+            for sample in data['train']:
+                if sample['review_weight']==1:
+                    sample['teacher_probability']=teacher(sample['features'].to(device),sample['region'].to(device)).sigmoid().cpu()
+        del teacher
+    optimizer = torch.optim.AdamW(head.parameters(),lr=args.learning_rate,weight_decay=.01)
     best = -1;stale = 0;history = []
-    checkpoint = ROOT/'models'/'mask2former_hazard_head.pt'
-    for epoch in range(1,61):
+    checkpoint = ROOT/'models'/(args.name+'.pt')
+    for epoch in range(1,args.epochs+1):
         head.train();random.shuffle(data['train']);losses = []
         for sample in data['train']:
             features = sample['features'].to(device).float()
             region = sample['region'].to(device).float();target = sample['target'].to(device).float()
+            reference=sample.get('teacher_probability')
+            if reference is not None:reference=reference.to(device)
             if random.random()<.5:
                 features=features.flip(-1);region=region.flip(-1);target=target.flip(-1)
+                if reference is not None:reference=reference.flip(-1)
             logits = head(features,region)
-            bce = F.binary_cross_entropy_with_logits(logits,target,pos_weight=torch.tensor(5.,device=device))
+            bce = F.binary_cross_entropy_with_logits(logits,target,pos_weight=torch.tensor(args.positive_weight,device=device))
             p = logits.sigmoid()
             dice = 1-(2*(p*target).sum()+1)/(p.sum()+target.sum()+1)
-            loss = bce+dice
+            loss = (bce+dice)*sample['review_weight']
+            if reference is not None:
+                loss=loss+args.distillation*F.binary_cross_entropy_with_logits(logits,reference)
             optimizer.zero_grad();loss.backward();optimizer.step();losses.append(float(loss.detach()))
         head.eval();values = {t:[] for t in (.25,.35,.45,.55,.65,.75)}
         with torch.inference_mode():
@@ -103,7 +138,13 @@ def main():
               'label_policy':'Human-selected Down second / Up first hazard polygon; no explicit direction or ordinal counting.',
               'whole_stairs_labels_available':False,'whole_stairs_backbone_finetuned':False,
               'best_val_mean_mask_iou':best,'history':history}
-    (ROOT/'models'/'hazard_head_training.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    report.update(manifest=str(manifest),checkpoint=str(checkpoint),pinned_images_used=len(pinned),
+                  pinned_weight=args.pin_weight,positive_weight=args.positive_weight,
+                  initialized_from=str(args.initialize) if args.initialize else None,
+                  learning_rate=args.learning_rate,distillation_weight=args.distillation,
+                  note='Original test/validation photos may have moved into training in a review experiment. Consult experiment split policy.')
+    report_name='hazard_head_training.json' if args.name=='mask2former_hazard_head' else args.name+'_training.json'
+    (ROOT/'models'/report_name).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
 
 
 if __name__=='__main__':main()
