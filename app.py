@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 import uuid
+import re
 
 import cv2
 import numpy as np
@@ -128,6 +129,7 @@ def process_video(key,path,confidence,color,engine='yolo',input_view='enhanced')
         output_fps=1 if engine=='mask2former' else 5
         step=max(1,int(np.ceil(fps/output_fps)));decoded=0;processed=0
         destination=OUTPUT/(key+'_result.mp4')
+        working=OUTPUT/(key+'_working.mp4')
         if engine=='mask2former':
             from mask2former_routes import get_detector
             net=get_detector()
@@ -148,13 +150,18 @@ def process_video(key,path,confidence,color,engine='yolo',input_view='enhanced')
             joined=np.hstack([views['original'],overlay]);hh,ww=joined.shape[:2]
             joined=cv2.resize(joined,(ww-ww%2,hh-hh%2))
             if writer is None:
-                writer=cv2.VideoWriter(str(destination),cv2.VideoWriter_fourcc(*'mp4v'),fps/step,(joined.shape[1],joined.shape[0]))
+                writer=cv2.VideoWriter(str(working),cv2.VideoWriter_fourcc(*'mp4v'),fps/step,(joined.shape[1],joined.shape[0]))
                 if not writer.isOpened():raise ValueError('MP4 인코더를 열지 못했습니다.')
             writer.write(joined);processed+=1
             jobs[key].update(status='processing',frames=processed,seconds=round(decoded/fps,1),
                              progress=min(99,round(decoded/max(count,1)*100)) if count>0 else None)
         if not processed:raise ValueError('유효한 프레임이 없습니다.')
-        writer.release();writer=None;jobs[key].update(status='done',progress=100,result=str(destination))
+        writer.release();writer=None
+        jobs[key].update(status='encoding',progress=99)
+        from video_encoding import browser_mp4
+        browser_mp4(working,destination)
+        working.unlink(missing_ok=True)
+        jobs[key].update(status='done',progress=100,result=str(destination),codec='h264',pixel_format='yuv420p')
     except Exception as exc:jobs[key].update(status='error',error=str(exc))
     finally:
         if capture:capture.release()
@@ -187,14 +194,38 @@ def video():
 
 @app.get('/api/video/<key>')
 def video_status(key):
-    job=jobs.get(key)
+    job=completed_video(key)
     if not job:return jsonify(error='작업이 없습니다. 서버 재시작 후에는 다시 업로드하세요.'),404
-    return jsonify(**{k:v for k,v in job.items() if k!='result'},download='/api/video/'+key+'/download' if job['status']=='done' else None)
+    return jsonify(**{k:v for k,v in job.items() if k!='result'},
+                   download='/api/video/'+key+'/download' if job['status']=='done' else None,
+                   playback='/api/video/'+key+'/play' if job['status']=='done' else None)
+
+
+def completed_video(key):
+    if key in jobs:return jobs[key]
+    if not re.fullmatch(r'[a-f0-9]{32}',key):return None
+    path=OUTPUT/(key+'_result.mp4')
+    if path.is_file():return {'id':key,'status':'done','progress':100,'result':str(path)}
+    return None
+
+
+@app.get('/api/video/<key>/play')
+def play_video(key):
+    job=completed_video(key)
+    if not job or job['status']!='done':return jsonify(error='완료된 영상이 없습니다.'),404
+    return send_file(job['result'],mimetype='video/mp4',conditional=True)
+
+
+@app.get('/videos')
+def video_gallery():
+    paths=sorted(OUTPUT.glob('*_result.mp4'),key=lambda p:p.stat().st_mtime,reverse=True)
+    keys=[p.name.removesuffix('_result.mp4') for p in paths if re.fullmatch(r'[a-f0-9]{32}_result.mp4',p.name)]
+    return render_template('videos.html',keys=keys)
 
 
 @app.get('/api/video/<key>/download')
 def download(key):
-    job=jobs.get(key)
+    job=completed_video(key)
     if not job or job['status']!='done':return jsonify(error='완료된 영상이 없습니다.'),404
     return send_file(job['result'],mimetype='video/mp4',as_attachment=True,download_name='hazard_step.mp4')
 

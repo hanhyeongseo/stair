@@ -38,7 +38,7 @@ async function video(file){
     $('videoStatus').textContent=`${r.seconds||0}초 · ${r.frames||0}프레임 처리`;$('progress').value=r.progress||0;
     if(r.status==='error')throw Error(r.error);
     if(r.status==='done'){
-      $('player').src=r.download;$('player').hidden=false;$('videoSave').href=r.download;$('videoSave').hidden=false;
+      $('player').src=r.playback||r.download;$('player').hidden=false;$('videoSave').href=r.download;$('videoSave').hidden=false;
       $('status').textContent='Mask2Former 영상 처리 완료 · 왼쪽 원본 / 오른쪽 계단 영역.';return;
     }
   }
